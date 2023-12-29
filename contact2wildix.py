@@ -1,3 +1,6 @@
+#CSV import in Wildix PBX Telefonbücher - die Konfig muss im config.py angepasst werden
+
+
 import csv
 import requests
 import phonenumbers
