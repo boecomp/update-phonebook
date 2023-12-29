@@ -6,7 +6,7 @@ import requests
 import phonenumbers
 import config
 
-# Funktion zum löschen der Daten
+# Funktion zum löschen der Daten im Telefonbuch
 def del_contacts(api_del_url):
     payload = {}
     headers = {
