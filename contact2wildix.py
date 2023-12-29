@@ -32,7 +32,7 @@ def send_data_to_api(api_url, api_id, api_secret, csv_file):
         for row in csv_reader:
 
             # Erstellen Sie einen Payload für die POST-Anfrage
-            payload = f'data%5Bname%5D={row['Name']}&data%5Bphonebook_id%5D=176&data%5Bphone%5D={phonenumbers.format_number(phonenumbers.parse(row['Phone'], "CH"), phonenumbers.PhoneNumberFormat.E164).replace("+","%2B")}&data%5Bmobile%5D={row['Mobile']}&data%5Bemail%5D={row['Email']}&data%5Btype%5D={row['Type']}&data%5Borganization%5D={row['Organization']}&data%5Bnote%5D={row['Abteilung']}'
+            payload = f'data%5Bname%5D={row["Name"]}&data%5Bphonebook_id%5D=176&data%5Bphone%5D={phonenumbers.format_number(phonenumbers.parse(row["Phone"], "CH"), phonenumbers.PhoneNumberFormat.E164).replace("+","%2B")}&data%5Bmobile%5D={row["Mobile"]}&data%5Bemail%5D={row["Email"]}&data%5Btype%5D={row["Type"]}&data%5Borganization%5D={row["Organization"]}&data%5Bnote%5D={row["Abteilung"]}'
 
             # Sende die Daten an die REST-API
             response = requests.post(api_url, headers=headers, data=payload)
