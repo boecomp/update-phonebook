@@ -1,7 +1,5 @@
 #CSV import in Wildix PBX Telefonbücher - die Konfig muss im config.py angepasst werden
-de_DE       -->  # -*- coding: iso-8859-1 -*-
-de_DE@euro  -->  # -*- coding: iso-8859-15 -*-
-de_DE.utf8  -->  # -*- coding: utf-8 -*-
+# -*- coding: iso-8859-1 -*-
 
 import csv
 import requests
