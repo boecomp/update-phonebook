@@ -19,7 +19,7 @@ def del_contacts(api_del_url):
 # Funktion zum Prüfen und Senden der Daten an die REST-API
 def send_data_to_api(api_url, api_id, api_secret, csv_file):
     headers = {
-    'Content-Type': 'application/x-www-form-urlencoded',
+    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
     api_id: api_secret,
     'Cookie': 'PHPSESSID=0lo981u5jd99ko17oo1m6k1tav; httpsOnly=1'
     }
