@@ -5,6 +5,7 @@ import requests
 import phonenumbers
 import config
 import urllib.parse
+from time import sleep
 
 # Funktion zum löschen der Daten im Telefonbuch
 def del_contacts(api_del_url):
