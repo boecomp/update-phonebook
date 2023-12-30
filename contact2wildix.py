@@ -41,7 +41,7 @@ def send_data_to_api(api_url, api_id, api_secret, csv_file):
             # Sende die Daten an die REST-API
             try:
                 response = requests.post(api_url, headers=headers, data=payload)
-            except TimeoutException:
+            except requests.exceptions.ConnectionError:
                 time.sleep(10)
 
             # Überprüfe die Antwort der API
