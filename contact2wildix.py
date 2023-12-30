@@ -39,7 +39,10 @@ def send_data_to_api(api_url, api_id, api_secret, csv_file):
                 print(f'Phone number: {row["Phone"]} is not valid. Please use the international format like 0041 6505551234')
 
             # Sende die Daten an die REST-API
-            response = requests.post(api_url, headers=headers, data=payload)
+            try:
+                response = requests.post(api_url, headers=headers, data=payload)
+            except TimeoutException:
+                time.sleep(10)
 
             # Überprüfe die Antwort der API
             if response.status_code == 200:
