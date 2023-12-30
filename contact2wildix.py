@@ -33,6 +33,7 @@ def send_data_to_api(api_url, api_id, api_secret, csv_file):
             # Erstellen Sie einen Payload für die POST-Anfrage
             try:
                 payload = f'data%5Bname%5D={row["Name"]}&data%5Bphonebook_id%5D=176&data%5Bphone%5D={phonenumbers.format_number(phonenumbers.parse(row["Phone"], "CH"), phonenumbers.PhoneNumberFormat.E164).replace("+","%2B")}&data%5Bmobile%5D={row["Mobile"]}&data%5Bemail%5D={row["Email"]}&data%5Btype%5D={row["Type"]}&data%5Borganization%5D={row["Organization"]}&data%5Bnote%5D={row["Abteilung"]}'
+                print(payload.text)
             except phonenumbers.NumberParseException:
                 print(f'Phone number: {row["Phone"]} is not valid. Please use the international format like 0041 6505551234')
 
