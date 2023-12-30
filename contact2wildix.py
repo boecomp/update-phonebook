@@ -43,7 +43,8 @@ def send_data_to_api(api_url, api_id, api_secret, csv_file):
             try:
                 response = requests.post(api_url, headers=headers, data=payload)
             except requests.exceptions.ConnectionError:
-                time.sleep(10)
+                print('Connection Error: warte 10 sekunden')
+                sleep(10)
 
             # Überprüfe die Antwort der API
             if response.status_code == 200:
