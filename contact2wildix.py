@@ -54,4 +54,4 @@ def send_data_to_api(api_url, api_id, api_secret, csv_file, phonebook_id):
 
 
 del_contacts(config.api_del_url)
-send_data_to_api(config.api_url, config.api_id, config.api_secret, config.csv_file_path, phonebook_id)
+send_data_to_api(config.api_url, config.api_id, config.api_secret, config.csv_file_path, config.phonebook_id)
