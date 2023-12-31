@@ -19,7 +19,7 @@ def del_contacts(api_del_url):
     #print(response.text)
 
 # Funktion zum Prüfen und Senden der Daten an die REST-API
-def send_data_to_api(api_url, api_id, api_secret, csv_file):
+def send_data_to_api(api_url, api_id, api_secret, csv_file, phonebook_id):
     headers = {
     'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
     api_id: api_secret,
@@ -34,7 +34,7 @@ def send_data_to_api(api_url, api_id, api_secret, csv_file):
 
             # Erstellen Sie einen Payload für die POST-Anfrage
             try:
-                payload = f'data%5Bname%5D={urllib.parse.quote(row["Name"])}&data%5Bphonebook_id%5D=176&data%5Bphone%5D={phonenumbers.format_number(phonenumbers.parse(row["Phone"], "CH"), phonenumbers.PhoneNumberFormat.E164).replace("+","%2B")}&data%5Bmobile%5D={row["Mobile"]}&data%5Bemail%5D={row["Email"]}&data%5Btype%5D={row["Type"]}&data%5Borganization%5D={urllib.parse.quote(row["Organization"])}&data%5Bnote%5D={row["Abteilung"]}'
+                payload = f'data%5Bname%5D={urllib.parse.quote(row["Name"])}&data%5Bphonebook_id%5D={phonebook_id}&data%5Bphone%5D={phonenumbers.format_number(phonenumbers.parse(row["Phone"], "CH"), phonenumbers.PhoneNumberFormat.E164).replace("+","%2B")}&data%5Bmobile%5D={row["Mobile"]}&data%5Bemail%5D={row["Email"]}&data%5Btype%5D={row["Type"]}&data%5Borganization%5D={urllib.parse.quote(row["Organization"])}&data%5Bnote%5D={row["Abteilung"]}'
                 #print(payload)
             except phonenumbers.NumberParseException:
                 print(f'Phone number: {row["Phone"]} is not valid. Please use the international format like 0041 6505551234')
@@ -54,4 +54,4 @@ def send_data_to_api(api_url, api_id, api_secret, csv_file):
 
 
 del_contacts(config.api_del_url)
-send_data_to_api(config.api_url, config.api_id, config.api_secret, config.csv_file_path)
+send_data_to_api(config.api_url, config.api_id, config.api_secret, config.csv_file_path, phonebook_id)
