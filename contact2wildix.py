@@ -18,8 +18,8 @@ def del_contacts(api_del_url, api_token):
 
         payload = {}
         headers = {
-        'Authorization': 'Bearer {api_token}',
-        'Cookie': 'PHPSESSID={cookie_value}'
+        'Authorization': f'Bearer {api_token}',
+        'Cookie': f'PHPSESSID={cookie_value}'
         }
         print (cookie_value)
 
@@ -36,12 +36,16 @@ def del_contacts(api_del_url, api_token):
 
 # Funktion zum Prüfen und Senden der Daten an die REST-API
 def send_data_to_api(api_url, api_id, api_secret, api_token, csv_file, phonebook_id):
+    with requests.Session() as session:
+        c = session.get(api_del_url)
+        for cookie in c.cookies:
+            cookie_value = cookie.value
     headers = {
     'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-    'Authorization': 'Bearer {api_token}',
-    'Cookie': 'PHPSESSID={cookie_value}'
+    'Authorization': f'Bearer {api_token}',
+    'Cookie': f'PHPSESSID={cookie_value}'
     }
-    print (c.cookies)
+    print (cookie_value)
 
     # Lese die CSV-Datei
     with open(csv_file, mode='r', encoding='utf-8') as file:
