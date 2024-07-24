@@ -37,7 +37,7 @@ def del_contacts(api_del_url, api_token):
 # Funktion zum Prüfen und Senden der Daten an die REST-API
 def send_data_to_api(api_url, api_id, api_secret, api_token, csv_file, phonebook_id):
     with requests.Session() as session:
-        c = session.get(api_del_url)
+        c = session.get(api_url)
         for cookie in c.cookies:
             cookie_value = cookie.value
     headers = {
