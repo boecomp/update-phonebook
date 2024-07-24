@@ -75,5 +75,5 @@ def exit_program():
     print("Exiting the program...")
     sys.exit(0)
 
-del_contacts(config.api_del_url)
-send_data_to_api(config.api_url, config.api_id, config.api_secret, config.csv_file_path, config.phonebook_id)
+del_contacts(config.api_del_url, config.api_token)
+send_data_to_api(config.api_url, config.api_id, config.api_secret, config.api_token, config.csv_file_path, config.phonebook_id)
