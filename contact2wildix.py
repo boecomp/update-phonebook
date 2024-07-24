@@ -10,13 +10,20 @@ import sys
 from time import sleep
 
 # Funktion zum löschen der Daten im Telefonbuch
-def del_contacts(api_del_url):
-    c = requests.get(api_del_url)
-    payload = {}
-    headers = {}
-    print (c.cookies)
+def del_contacts(api_del_url, api_token):
+    with requests.Session() as session:
+        c = session.get(api_del_url)
+        for cookie in c.cookies:
+            cookie_value = cookie.value
 
-    response = requests.request("DELETE", api_del_url, headers=headers, data=payload, cookies=c.cookies)
+        payload = {}
+        headers = {
+        'Authorization': 'Bearer {api_token}',
+        'Cookie': 'PHPSESSID={cookie_value}'
+        }
+        print (cookie_value)
+
+    response = requests.request("DELETE", api_del_url, headers=headers, data=payload)
 
     # Überprüfe die Antwort der API
     current_time = datetime.datetime.now()
@@ -24,16 +31,15 @@ def del_contacts(api_del_url):
         print(f'Daten erfolgreich gelöscht. Timestamp: {current_time}')
     else:
         print(f'Fehler beim löschen der Daten. Statuscode: {response.status_code} Timestamp: {current_time}')
-        exit_program()
 
     #print(response.text)
 
 # Funktion zum Prüfen und Senden der Daten an die REST-API
-def send_data_to_api(api_url, api_id, api_secret, csv_file, phonebook_id):
+def send_data_to_api(api_url, api_id, api_secret, api_token, csv_file, phonebook_id):
     headers = {
     'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-    api_id: api_secret,
-    'Cookie': 'PHPSESSID={cookie_value}; httpsOnly=1'
+    'Authorization': 'Bearer {api_token}',
+    'Cookie': 'PHPSESSID={cookie_value}'
     }
     print (c.cookies)
 
