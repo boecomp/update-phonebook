@@ -71,6 +71,8 @@ def send_data_to_api(api_url, api_id, api_secret, api_token, csv_file, phonebook
             current_time = datetime.datetime.now()
             if response.status_code == 200:
                 print(f'Daten für {row["Name"]} erfolgreich an die API gesendet. Timestamp: {current_time}')
+            elif response.status_code == 400:
+                print(f'Fehler beim Senden der Daten für {row["Name"]}. Statuscode: {response.status_code} Timestamp: {current_time}')
             else:
                 print(f'Fehler beim Senden der Daten für {row["Name"]}. Statuscode: {response.status_code} Timestamp: {current_time}')
                 exit_program()
