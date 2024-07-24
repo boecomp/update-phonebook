@@ -6,20 +6,17 @@ import phonenumbers
 import config
 import urllib.parse
 import datetime
+import sys
 from time import sleep
 
 # Funktion zum löschen der Daten im Telefonbuch
 def del_contacts(api_del_url):
     c = requests.get(api_del_url)
-    for cookie in c.cookies:
-        cookie_value = cookie.value
     payload = {}
-    headers = {
-    'Cookie': 'PHPSESSID={cookie_value}; httpsOnly=1'
-    }
-    print (cookie.name, cookie.value)
+    headers = {}
+    print (c.cookies)
 
-    response = requests.request("DELETE", api_del_url, headers=headers, data=payload)
+    response = requests.request("DELETE", api_del_url, headers=headers, data=payload, cookies=c.cookies)
 
     # Überprüfe die Antwort der API
     current_time = datetime.datetime.now()
@@ -38,7 +35,7 @@ def send_data_to_api(api_url, api_id, api_secret, csv_file, phonebook_id):
     api_id: api_secret,
     'Cookie': 'PHPSESSID={cookie_value}; httpsOnly=1'
     }
-    print (cookie.name, cookie.value)
+    print (c.cookies)
 
     # Lese die CSV-Datei
     with open(csv_file, mode='r', encoding='utf-8') as file:
@@ -55,7 +52,7 @@ def send_data_to_api(api_url, api_id, api_secret, csv_file, phonebook_id):
 
             # Sende die Daten an die REST-API
             try:
-                response = requests.post(api_url, headers=headers, data=payload)
+                response = requests.post(api_url, headers=headers, data=payload, cookies=c.cookies)
             except requests.exceptions.ConnectionError:
                 print('Connection Error: warte 10 sekunden')
                 sleep(10)
