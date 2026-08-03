@@ -26,6 +26,7 @@ import config
 import urllib.parse
 import sys
 import logging
+import time
 from time import sleep
 
 # Sicherstellen, dass print/log-Ausgaben sofort erscheinen und nicht im
@@ -102,10 +103,13 @@ def get_all_contacts(phonebook_contacts_url, headers, page_size=100):
     """Alle Kontakte eines Telefonbuchs abrufen, dedupliziert nach Id."""
     contacts_by_id = {}
     offset = 0
+    previous_count = -1
+    stalled_pages = 0
 
     log.info(f'Lade bestehende Kontakte von {phonebook_contacts_url} ...')
 
     while True:
+        page_start = time.monotonic()
         try:
             response = requests.get(
                 phonebook_contacts_url,
@@ -120,6 +124,7 @@ def get_all_contacts(phonebook_contacts_url, headers, page_size=100):
         except requests.exceptions.RequestException as e:
             log.error(f'Verbindungsfehler beim Abrufen der Kontakte (offset {offset}): {e}')
             exit_program()
+        page_duration = time.monotonic() - page_start
 
         if response.status_code != 200:
             log.error(f'Fehler beim Abrufen der Kontakte (offset {offset}). '
@@ -139,7 +144,30 @@ def get_all_contacts(phonebook_contacts_url, headers, page_size=100):
             if cid is not None:
                 contacts_by_id[cid] = record
 
-        log.info(f'  ... {len(contacts_by_id)} von {total} Kontakten geladen')
+        log.info(f'  ... {len(contacts_by_id)} von {total} Kontakten geladen '
+                 f'(diese Seite: {len(records)} Datensaetze in {page_duration:.1f}s, offset={offset})')
+
+        # SICHERHEITSCHECK: Wenn eine Seite keine neuen (bisher ungesehenen) Kontakte
+        # bringt, respektiert die PBX vermutlich 'limit'/'offset' nicht wie erwartet.
+        # Dann NICHT mit unvollstaendigen Daten weitermachen (Gefahr: faelschlich als
+        # "nicht mehr in CSV" erkannte Kontakte wuerden geloescht) - sondern abbrechen.
+        if len(contacts_by_id) == previous_count:
+            stalled_pages += 1
+            if stalled_pages >= 2:
+                log.error(
+                    'ABBRUCH: Die Kontaktliste waechst nicht mehr weiter, obwohl laut '
+                    f'API noch {total - len(contacts_by_id)} Kontakte fehlen. '
+                    'Die Parameter "limit"/"offset" werden von dieser PBX vermutlich '
+                    'nicht unterstuetzt oder die Pagination funktioniert anders als erwartet. '
+                    'Um versehentliches Loeschen wegen unvollstaendiger Daten zu verhindern, '
+                    'wird das Script hier gestoppt. Bitte in der API-Referenz '
+                    '(https://docs.wildix.com/api-reference/rest/wms/pbx/) den korrekten '
+                    'Pagination-Mechanismus fuer GET .../contacts/ pruefen.'
+                )
+                exit_program()
+        else:
+            stalled_pages = 0
+        previous_count = len(contacts_by_id)
 
         if len(contacts_by_id) >= total or len(records) < page_size:
             break
