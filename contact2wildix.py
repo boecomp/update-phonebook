@@ -11,13 +11,41 @@
 #     Kontakt-IDs im Telefonbuch abgefragt und dann einzeln per DELETE entfernt.
 
 import csv
+import re
 import requests
 import phonenumbers
 import config
 import urllib.parse
 import datetime
 import sys
+import logging
 from time import sleep
+
+# Logging-Setup: schreibt in Konsole UND in eine Log-Datei
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler('import_errors.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout),
+    ]
+)
+log = logging.getLogger(__name__)
+
+EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+def is_valid_name(name):
+    """Ein Name gilt nur als gueltig, wenn er mind. einen Buchstaben enthaelt."""
+    return bool(re.search(r'[A-Za-zÀ-ÿ]', name or ''))
+
+
+def is_valid_email(email):
+    """Leere Email ist ok (kein Fehler), nur ein vorhandener, aber falsch formatierter
+    Wert gilt als ungueltig."""
+    if not email:
+        return True
+    return bool(EMAIL_RE.match(email))
 
 
 def get_headers():
@@ -38,7 +66,7 @@ def del_contacts(phonebook_contacts_url):
     current_time = datetime.datetime.now()
 
     if response.status_code != 200:
-        print(f'Fehler beim Abrufen der Kontakte. Statuscode: {response.status_code} '
+        log.error(f'Fehler beim Abrufen der Kontakte. Statuscode: {response.status_code} '
               f'Antwort: {response.text} Timestamp: {current_time}')
         exit_program()
 
@@ -50,10 +78,10 @@ def del_contacts(phonebook_contacts_url):
         contacts = contacts.get('contacts', [])
 
     if not contacts:
-        print(f'Keine Kontakte im Telefonbuch gefunden. Timestamp: {current_time}')
+        log.info('Keine Kontakte im Telefonbuch gefunden.')
         return
 
-    print(f'{len(contacts)} Kontakte gefunden, werden geloescht...')
+    log.info(f'{len(contacts)} Kontakte gefunden, werden geloescht...')
 
     # 2. Jeden Kontakt einzeln loeschen
     for contact in contacts:
@@ -66,11 +94,10 @@ def del_contacts(phonebook_contacts_url):
         current_time = datetime.datetime.now()
 
         if del_response.status_code == 200:
-            print(f'Kontakt {contact_id} erfolgreich geloescht. Timestamp: {current_time}')
+            log.info(f'Kontakt {contact_id} erfolgreich geloescht.')
         else:
-            print(f'Fehler beim Loeschen von Kontakt {contact_id}. '
-                  f'Statuscode: {del_response.status_code} Antwort: {del_response.text} '
-                  f'Timestamp: {current_time}')
+            log.error(f'Fehler beim Loeschen von Kontakt {contact_id}. '
+                      f'Statuscode: {del_response.status_code} Antwort: {del_response.text}')
 
 
 # Funktion zum Pruefen und Senden der Daten an die REST-API
@@ -78,9 +105,30 @@ def send_data_to_api(api_url, csv_file, phonebook_id):
     headers = get_headers()
 
     # Lese die CSV-Datei
-    with open(csv_file, mode='r', encoding='utf-8') as file:
+    # utf-8-sig statt utf-8, damit ein evtl. BOM am Dateianfang nicht das erste
+    # Spalten-Feld (Id) kaputt macht
+    with open(csv_file, mode='r', encoding='utf-8-sig', newline='') as file:
         csv_reader = csv.DictReader(file)
-        for row in csv_reader:
+        for line_no, row in enumerate(csv_reader, start=2):  # start=2: Zeile 1 = Header
+            record_id = row.get('Id', '').strip()
+            name = row.get('Name', '').strip()
+            email = row.get('Email', '').strip()
+
+            # Ungueltiger/leerer Name -> Datensatz komplett ueberspringen
+            if not is_valid_name(name):
+                log.warning(
+                    f'Zeile {line_no} (Id {record_id}) uebersprungen: '
+                    f'ungueltiger Name {name!r}'
+                )
+                continue
+
+            # Ungueltige Email -> Kontakt trotzdem importieren, aber ohne Email
+            if not is_valid_email(email):
+                log.warning(
+                    f'Zeile {line_no} (Id {record_id}, {name}): '
+                    f'ungueltige Email {email!r} wird nicht importiert, Feld bleibt leer'
+                )
+                email = ''
 
             # Erstelle den Payload fuer die POST-Anfrage
             try:
@@ -89,16 +137,19 @@ def send_data_to_api(api_url, csv_file, phonebook_id):
                     phonenumbers.PhoneNumberFormat.E164
                 ).replace("+", "%2B")
             except phonenumbers.NumberParseException:
-                print(f'Phone number: {row["Phone"]} is not valid. '
-                      f'Please use the international format like 0041 6505551234')
+                log.warning(
+                    f'Zeile {line_no} (Id {record_id}, {name}) uebersprungen: '
+                    f'Telefonnummer {row["Phone"]!r} ist ungueltig. '
+                    f'Bitte internationales Format wie 0041 6505551234 verwenden.'
+                )
                 continue
 
             payload = (
-                f'data%5Bname%5D={urllib.parse.quote(row["Name"])}'
+                f'data%5Bname%5D={urllib.parse.quote(name)}'
                 f'&data%5Bphonebook_id%5D={phonebook_id}'
                 f'&data%5Bphone%5D={phone_e164}'
                 f'&data%5Bmobile%5D={row["Mobile"]}'
-                f'&data%5Bemail%5D={row["Email"]}'
+                f'&data%5Bemail%5D={urllib.parse.quote(email)}'
                 f'&data%5Btype%5D={row["Type"]}'
                 f'&data%5Borganization%5D={urllib.parse.quote(row["Organization"])}'
                 f'&data%5Bnote%5D={row["Abteilung"]}'
@@ -108,22 +159,23 @@ def send_data_to_api(api_url, csv_file, phonebook_id):
             try:
                 response = requests.post(api_url, headers=headers, data=payload)
             except requests.exceptions.ConnectionError:
-                print('Connection Error: warte 10 sekunden')
+                log.warning('Connection Error: warte 10 sekunden')
                 sleep(10)
                 continue
 
             # Ueberpruefe die Antwort der API
-            current_time = datetime.datetime.now()
             if response.status_code == 200:
-                print(f'Daten fuer {row["Name"]} erfolgreich an die API gesendet. Timestamp: {current_time}')
+                log.info(f'Zeile {line_no} (Id {record_id}, {name}): erfolgreich importiert.')
             else:
-                print(f'Fehler beim Senden der Daten fuer {row["Name"]}. '
-                      f'Statuscode: {response.status_code} Antwort: {response.text} Timestamp: {current_time}')
+                log.error(
+                    f'Zeile {line_no} (Id {record_id}, {name}): Fehler beim Senden. '
+                    f'Statuscode: {response.status_code} Antwort: {response.text}'
+                )
                 exit_program()
 
 
 def exit_program():
-    print("Exiting the program...")
+    log.info("Exiting the program...")
     sys.exit(0)
 
 
