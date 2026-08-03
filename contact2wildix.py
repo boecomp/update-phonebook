@@ -55,27 +55,45 @@ def get_headers():
     }
 
 
+# Funktion zum Abrufen ALLER Kontakte eines Telefonbuchs (mit Pagination)
+def get_all_contacts(phonebook_contacts_url, headers, page_size=100):
+    all_contacts = []
+    offset = 0
+
+    while True:
+        response = requests.get(
+            phonebook_contacts_url,
+            headers=headers,
+            params={'limit': page_size, 'offset': offset}
+        )
+
+        if response.status_code != 200:
+            log.error(f'Fehler beim Abrufen der Kontakte (offset {offset}). '
+                      f'Statuscode: {response.status_code} Antwort: {response.text}')
+            exit_program()
+
+        data = response.json()
+        # Die Wildix API liefert die Liste als {"result": {"records": [...], "total": N}}
+        result = data.get('result', data)
+        records = result.get('records', []) if isinstance(result, dict) else result
+        total = result.get('total', len(records)) if isinstance(result, dict) else len(records)
+
+        all_contacts.extend(records)
+
+        if not records or len(all_contacts) >= total:
+            break
+        offset += page_size
+
+    return all_contacts
+
+
 # Funktion zum Loeschen aller Kontakte in einem Telefonbuch
 def del_contacts(phonebook_contacts_url):
     headers = {
         'Authorization': f'Bearer {config.api_key}',
     }
 
-    # 1. Alle Kontakte im Telefonbuch abfragen, um die IDs zu bekommen
-    response = requests.get(phonebook_contacts_url, headers=headers)
-    current_time = datetime.datetime.now()
-
-    if response.status_code != 200:
-        log.error(f'Fehler beim Abrufen der Kontakte. Statuscode: {response.status_code} '
-              f'Antwort: {response.text} Timestamp: {current_time}')
-        exit_program()
-
-    data = response.json()
-    # Je nach API-Response-Format liegt die Liste direkt in "result" oder in "result.contacts" -
-    # hier beide Faelle abfangen.
-    contacts = data.get('result', data)
-    if isinstance(contacts, dict):
-        contacts = contacts.get('contacts', [])
+    contacts = get_all_contacts(phonebook_contacts_url, headers)
 
     if not contacts:
         log.info('Keine Kontakte im Telefonbuch gefunden.')
