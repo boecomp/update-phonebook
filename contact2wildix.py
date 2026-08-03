@@ -117,10 +117,9 @@ def get_headers():
 
 
 def build_payload(fields):
-    """Baut den JSON-Body fuer POST/PUT. Die neue REST-v1-API der PBX erwartet
-    flache JSON-Objekte, kein form-urlencoded data[...] Bracket-Format wie die
-    alte API."""
-    return {str(k): str(v) for k, v in fields.items()}
+    """Baut den JSON-Body fuer POST/PUT. Bestaetigt per curl-Test: die API erwartet
+    die Felder verschachtelt unter dem Key "data", z.B. {"data": {"name": "...", ...}}"""
+    return {'data': {str(k): str(v) for k, v in fields.items()}}
 
 
 def exit_program():
