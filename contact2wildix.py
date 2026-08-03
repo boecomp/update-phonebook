@@ -99,7 +99,7 @@ def get_headers():
     }
 
 
-def get_all_contacts(phonebook_contacts_url, headers, page_size=100):
+def get_all_contacts(session, phonebook_contacts_url, headers, page_size=100):
     """Alle Kontakte eines Telefonbuchs abrufen, dedupliziert nach Id."""
     contacts_by_id = {}
     offset = 0
@@ -111,7 +111,7 @@ def get_all_contacts(phonebook_contacts_url, headers, page_size=100):
     while True:
         page_start = time.monotonic()
         try:
-            response = requests.get(
+            response = session.get(
                 phonebook_contacts_url,
                 headers=headers,
                 params={'limit': page_size, 'offset': offset},
@@ -219,7 +219,7 @@ def diff_contact(existing, name, phone_plus, mobile, email, organization, note, 
     return changes
 
 
-def delete_contacts(phonebook_contacts_url, headers, contact_ids):
+def delete_contacts(session, phonebook_contacts_url, headers, contact_ids):
     if not contact_ids:
         log.info('Keine verwaisten (von diesem Script verwalteten) Kontakte zu loeschen.')
         return
@@ -229,7 +229,7 @@ def delete_contacts(phonebook_contacts_url, headers, contact_ids):
 
     for contact_id in contact_ids:
         del_url = f'{phonebook_contacts_url}{contact_id}/'
-        del_response = requests.delete(del_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        del_response = session.delete(del_url, headers=headers, timeout=REQUEST_TIMEOUT)
 
         if del_response.status_code == 200:
             log.info(f'Kontakt {contact_id} erfolgreich geloescht.')
@@ -238,7 +238,7 @@ def delete_contacts(phonebook_contacts_url, headers, contact_ids):
                       f'Statuscode: {del_response.status_code} Antwort: {del_response.text}')
 
 
-def sync_contacts_from_csv(api_url, phonebook_contacts_url, csv_file, phonebook_id,
+def sync_contacts_from_csv(session, api_url, phonebook_contacts_url, csv_file, phonebook_id,
                             existing_contacts, doc_id_index, legacy_phone_index):
     headers = get_headers()
     matched_ids = set()
@@ -314,7 +314,7 @@ def sync_contacts_from_csv(api_url, phonebook_contacts_url, csv_file, phonebook_
                     put_url = f'{phonebook_contacts_url}{existing_id}/'
                     data = send_payload(payload_fields)
                     try:
-                        response = requests.put(put_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
+                        response = session.put(put_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
                     except requests.exceptions.ConnectionError:
                         log.warning('Connection Error: warte 10 sekunden')
                         sleep(10)
@@ -341,7 +341,7 @@ def sync_contacts_from_csv(api_url, phonebook_contacts_url, csv_file, phonebook_
             # 3. Kein Treffer -> neuer Kontakt
             data = send_payload(payload_fields)
             try:
-                response = requests.post(api_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
+                response = session.post(api_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
             except requests.exceptions.ConnectionError:
                 log.warning('Connection Error: warte 10 sekunden')
                 sleep(10)
@@ -375,23 +375,29 @@ if __name__ == "__main__":
 
     headers = {'Authorization': f'Bearer {config.api_key}'}
 
-    # 1. Bestehende Kontakte laden
-    existing_contacts = get_all_contacts(config.phonebook_contacts_url, headers)
-    log.info(f'{len(existing_contacts)} bestehende Kontakte im Telefonbuch gefunden.')
+    # Gemeinsame Session fuer alle Requests, damit Cookies (z.B. PHPSESSID),
+    # die die PBX setzt, ueber alle Aufrufe hinweg (inkl. Pagination) erhalten
+    # bleiben statt bei jedem Request neu verhandelt zu werden.
+    with requests.Session() as session:
+        session.headers.update(headers)
 
-    doc_id_index = build_document_id_index(existing_contacts)
-    legacy_phone_index = build_legacy_phone_index(existing_contacts)
-    log.info(f'{len(doc_id_index)} Kontakte mit document_id (von diesem Script verwaltet), '
-             f'{len(legacy_phone_index)} Telefonnummern aus Alt-Kontakten fuer Migration verfuegbar.')
+        # 1. Bestehende Kontakte laden
+        existing_contacts = get_all_contacts(session, config.phonebook_contacts_url, headers)
+        log.info(f'{len(existing_contacts)} bestehende Kontakte im Telefonbuch gefunden.')
 
-    # 2. CSV syncen
-    matched_ids = sync_contacts_from_csv(
-        config.api_url, config.phonebook_contacts_url, config.csv_file_path,
-        config.phonebook_id, existing_contacts, doc_id_index, legacy_phone_index
-    )
+        doc_id_index = build_document_id_index(existing_contacts)
+        legacy_phone_index = build_legacy_phone_index(existing_contacts)
+        log.info(f'{len(doc_id_index)} Kontakte mit document_id (von diesem Script verwaltet), '
+                 f'{len(legacy_phone_index)} Telefonnummern aus Alt-Kontakten fuer Migration verfuegbar.')
 
-    # 3. Verwaiste, von diesem Script verwaltete Kontakte loeschen
-    #    (nur Kontakte mit document_id, die NICHT in der CSV vorkamen)
-    managed_ids = set(doc_id_index.values())
-    orphaned_ids = [cid for cid in managed_ids if cid not in matched_ids]
-    delete_contacts(config.phonebook_contacts_url, headers, orphaned_ids)
+        # 2. CSV syncen
+        matched_ids = sync_contacts_from_csv(
+            session, config.api_url, config.phonebook_contacts_url, config.csv_file_path,
+            config.phonebook_id, existing_contacts, doc_id_index, legacy_phone_index
+        )
+
+        # 3. Verwaiste, von diesem Script verwaltete Kontakte loeschen
+        #    (nur Kontakte mit document_id, die NICHT in der CSV vorkamen)
+        managed_ids = set(doc_id_index.values())
+        orphaned_ids = [cid for cid in managed_ids if cid not in matched_ids]
+        delete_contacts(session, config.phonebook_contacts_url, headers, orphaned_ids)
