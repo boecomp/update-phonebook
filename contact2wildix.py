@@ -27,7 +27,6 @@ import re
 import requests
 import phonenumbers
 import config
-import urllib.parse
 import sys
 import logging
 from time import sleep
@@ -112,14 +111,16 @@ def save_state(state):
 
 def get_headers():
     return {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Content-Type': 'application/json',
         'Authorization': f'Bearer {config.api_key}',
     }
 
 
-def send_payload(fields):
-    parts = [f'data%5B{k}%5D={urllib.parse.quote(str(v))}' for k, v in fields.items()]
-    return '&'.join(parts)
+def build_payload(fields):
+    """Baut den JSON-Body fuer POST/PUT. Die neue REST-v1-API der PBX erwartet
+    flache JSON-Objekte, kein form-urlencoded data[...] Bracket-Format wie die
+    alte API."""
+    return {str(k): str(v) for k, v in fields.items()}
 
 
 def exit_program():
@@ -202,10 +203,10 @@ def initial_import(session, api_url, headers, phonebook_id, rows):
             organization=row['organization'], note=row['note'],
             document_id=row['record_id'],
         )
-        data = send_payload(payload_fields)
+        payload_json = build_payload(payload_fields)
 
         try:
-            response = session.post(api_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
+            response = session.post(api_url, headers=headers, json=payload_json, timeout=REQUEST_TIMEOUT)
         except requests.exceptions.ConnectionError:
             log.warning('Connection Error: warte 10 sekunden')
             sleep(10)
@@ -253,9 +254,9 @@ def sync_with_state(session, api_url, phonebook_contacts_url, headers, phonebook
         )
 
         if existing is None:
-            data = send_payload(payload_fields)
+            payload_json = build_payload(payload_fields)
             try:
-                response = session.post(api_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
+                response = session.post(api_url, headers=headers, json=payload_json, timeout=REQUEST_TIMEOUT)
             except requests.exceptions.ConnectionError:
                 log.warning('Connection Error: warte 10 sekunden')
                 sleep(10)
@@ -282,9 +283,9 @@ def sync_with_state(session, api_url, phonebook_contacts_url, headers, phonebook
             continue
 
         put_url = f'{phonebook_contacts_url}{existing["contact_id"]}/'
-        data = send_payload(payload_fields)
+        payload_json = build_payload(payload_fields)
         try:
-            response = session.put(put_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
+            response = session.put(put_url, headers=headers, json=payload_json, timeout=REQUEST_TIMEOUT)
         except requests.exceptions.ConnectionError:
             log.warning('Connection Error: warte 10 sekunden')
             sleep(10)
