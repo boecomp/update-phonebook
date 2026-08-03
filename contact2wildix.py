@@ -28,6 +28,15 @@ import sys
 import logging
 from time import sleep
 
+# Sicherstellen, dass print/log-Ausgaben sofort erscheinen und nicht im
+# Output-Puffer haengen bleiben (wichtig z.B. wenn stdout umgeleitet wird)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except AttributeError:
+    pass  # aeltere Python-Versionen: kein reconfigure verfuegbar
+
+REQUEST_TIMEOUT = 20  # Sekunden - verhindert, dass das Script bei Netzwerkproblemen ewig haengt
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -94,12 +103,23 @@ def get_all_contacts(phonebook_contacts_url, headers, page_size=100):
     contacts_by_id = {}
     offset = 0
 
+    log.info(f'Lade bestehende Kontakte von {phonebook_contacts_url} ...')
+
     while True:
-        response = requests.get(
-            phonebook_contacts_url,
-            headers=headers,
-            params={'limit': page_size, 'offset': offset}
-        )
+        try:
+            response = requests.get(
+                phonebook_contacts_url,
+                headers=headers,
+                params={'limit': page_size, 'offset': offset},
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.exceptions.Timeout:
+            log.error(f'Timeout ({REQUEST_TIMEOUT}s) beim Abrufen der Kontakte (offset {offset}). '
+                      f'Pruefe Netzwerk/PBX-Erreichbarkeit.')
+            exit_program()
+        except requests.exceptions.RequestException as e:
+            log.error(f'Verbindungsfehler beim Abrufen der Kontakte (offset {offset}): {e}')
+            exit_program()
 
         if response.status_code != 200:
             log.error(f'Fehler beim Abrufen der Kontakte (offset {offset}). '
@@ -118,6 +138,8 @@ def get_all_contacts(phonebook_contacts_url, headers, page_size=100):
             cid = record.get('id')
             if cid is not None:
                 contacts_by_id[cid] = record
+
+        log.info(f'  ... {len(contacts_by_id)} von {total} Kontakten geladen')
 
         if len(contacts_by_id) >= total or len(records) < page_size:
             break
@@ -179,7 +201,7 @@ def delete_contacts(phonebook_contacts_url, headers, contact_ids):
 
     for contact_id in contact_ids:
         del_url = f'{phonebook_contacts_url}{contact_id}/'
-        del_response = requests.delete(del_url, headers=headers)
+        del_response = requests.delete(del_url, headers=headers, timeout=REQUEST_TIMEOUT)
 
         if del_response.status_code == 200:
             log.info(f'Kontakt {contact_id} erfolgreich geloescht.')
@@ -194,9 +216,13 @@ def sync_contacts_from_csv(api_url, phonebook_contacts_url, csv_file, phonebook_
     matched_ids = set()
     stats = {'created': 0, 'updated': 0, 'unchanged': 0, 'adopted': 0, 'invalid': 0}
 
+    log.info(f'Starte CSV-Sync: {csv_file}')
+
     with open(csv_file, mode='r', encoding='utf-8-sig', newline='') as file:
         csv_reader = csv.DictReader(file)
         for line_no, row in enumerate(csv_reader, start=2):
+            if line_no % 100 == 0:
+                log.info(f'  ... Zeile {line_no} in Bearbeitung')
             record_id = row.get('Id', '').strip()
             name = row.get('Name', '').strip()
             email = row.get('Email', '').strip()
@@ -260,7 +286,7 @@ def sync_contacts_from_csv(api_url, phonebook_contacts_url, csv_file, phonebook_
                     put_url = f'{phonebook_contacts_url}{existing_id}/'
                     data = send_payload(payload_fields)
                     try:
-                        response = requests.put(put_url, headers=headers, data=data)
+                        response = requests.put(put_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
                     except requests.exceptions.ConnectionError:
                         log.warning('Connection Error: warte 10 sekunden')
                         sleep(10)
@@ -287,7 +313,7 @@ def sync_contacts_from_csv(api_url, phonebook_contacts_url, csv_file, phonebook_
             # 3. Kein Treffer -> neuer Kontakt
             data = send_payload(payload_fields)
             try:
-                response = requests.post(api_url, headers=headers, data=data)
+                response = requests.post(api_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
             except requests.exceptions.ConnectionError:
                 log.warning('Connection Error: warte 10 sekunden')
                 sleep(10)
@@ -316,6 +342,9 @@ def exit_program():
 
 
 if __name__ == "__main__":
+    log.info("=== Wildix Contact Sync gestartet ===")
+    log.info(f"Phonebook-URL: {config.phonebook_contacts_url}")
+
     headers = {'Authorization': f'Bearer {config.api_key}'}
 
     # 1. Bestehende Kontakte laden
