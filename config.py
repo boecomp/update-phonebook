@@ -1,13 +1,19 @@
 #Konfiguration
-
+ 
 #Individuelle Einstellungen
-wildix_domain = 'domain' #the part before .wildixin.com
-phonebook_id = 176 #change it to the real phonebook id
-api_id = 'api id from pbx' #create a application in the pbx section integrations and ass here the id and secret key
-api_secret = 'secret key from PBX'
-api_token = 'simple token'
+wildix_domain = 'domain'  # der Teil vor .wildixin.com (z.B. 'heag')
+phonebook_id = 176        # change it to the real phonebook id
 csv_file_path = '/pfad/zum/CSV/contacts.csv'
-
-#Standardpfade
-api_url = f'https://{wildix_domain}.wildixin.com/api/v1/Contacts/'
-api_del_url = f'https://{wildix_domain}.wildixin.com/api/v1/Phonebooks/{phonebook_id}/Contacts/'
+ 
+# Neuer Company API Key aus WMS -> PBX -> Integrations -> Company API Keys
+# Benoetigter Scope fuer dieses Script: phonebooks:*  (oder pbx:*)
+# Am besten NICHT hier im Klartext lassen, sondern als Umgebungsvariable setzen:
+#   export WILDIX_API_KEY="wsk-v1-....."
+# und unten den os.getenv Fallback nutzen.
+import os
+api_key = os.getenv('WILDIX_API_KEY', 'wsk-v1-DEIN-API-KEY-HIER')
+ 
+#Standardpfade (neue, kleingeschriebene v1 Routen)
+api_url = f'https://{wildix_domain}.wildixin.com/api/v1/contacts/'
+phonebook_contacts_url = f'https://{wildix_domain}.wildixin.com/api/v1/phonebooks/{phonebook_id}/contacts/'
+ 
