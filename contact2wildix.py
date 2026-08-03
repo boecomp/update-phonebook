@@ -1,24 +1,28 @@
 #CSV import in Wildix PBX Telefonbuecher - die Konfig muss in config.py angepasst werden.
 #
-# Sync-Logik (Company API Key Authentifizierung):
+# WICHTIGER HINTERGRUND:
+# Die Listen-API der PBX (GET .../phonebooks/{id}/contacts/) ignoriert bei diesem
+# System "limit"/"offset"/"page"/"skip" komplett und liefert IMMER nur die ersten
+# 100 Kontakte zurueck. Ein "alle Kontakte laden und live abgleichen"-Sync ist damit
+# nicht zuverlaessig moeglich.
 #
-#   1. Alle bestehenden Kontakte im Telefonbuch abrufen (Pagination, dedupliziert nach Id)
-#   2. Matching-Key ist die CSV-Id, gespeichert im Kontaktfeld "document_id":
-#        - Kontakt mit passender document_id gefunden -> Felder vergleichen,
-#          nur bei tatsaechlicher Aenderung ein Update (PUT) schicken, sonst ueberspringen
-#        - Kein Treffer per document_id -> Fallback: alten Kontakt (noch OHNE document_id)
-#          per Telefonnummer suchen und "adoptieren" (document_id nachtraeglich setzen).
-#          Das ist die einmalige Migration von Alt-Kontakten, die vor Einfuehrung
-#          dieses Schemas angelegt wurden.
-#        - Auch das schlaegt fehl -> neuer Kontakt wird angelegt (POST), inkl. document_id
-#   3. Kontakte, die ein document_id besitzen, aber in der aktuellen CSV nicht mehr
-#      vorkommen, werden geloescht (verwaiste, von diesem Script verwaltete Kontakte).
-#      Kontakte OHNE document_id (z.B. manuell in WMS angelegt) werden NIE automatisch
-#      geloescht, auch wenn sie nicht in der CSV stehen.
+# LOESUNG: Das Telefonbuch wird VOR dem ersten Lauf manuell in WMS geleert (macht der
+# Benutzer selbst). Danach:
+#   1. Erstlauf (keine state-Datei vorhanden): alle CSV-Zeilen werden frisch angelegt,
+#      jeweils mit document_id = CSV-Id. Der Zustand wird in einer lokalen Datei
+#      (config.state_file_path) gespeichert: document_id -> {contact_id, Feldwerte}
+#   2. Alle weiteren Laeufe: es wird NUR NOCH gegen diese lokale Datei verglichen,
+#      die Listen-API wird nicht mehr gebraucht:
+#        - CSV-Zeile mit bekannter document_id + unveraenderten Werten -> ueberspringen
+#        - CSV-Zeile mit bekannter document_id + geaenderten Werten -> Update (PUT)
+#        - CSV-Zeile mit neuer document_id -> neu anlegen (POST)
+#        - document_id in der state-Datei, aber nicht mehr in der CSV -> loeschen (DELETE)
 #
 # Benoetigter Scope auf dem API Key: phonebooks:*  (oder pbx:*)
 
 import csv
+import json
+import os
 import re
 import requests
 import phonenumbers
@@ -26,17 +30,14 @@ import config
 import urllib.parse
 import sys
 import logging
-import time
 from time import sleep
 
-# Sicherstellen, dass print/log-Ausgaben sofort erscheinen und nicht im
-# Output-Puffer haengen bleiben (wichtig z.B. wenn stdout umgeleitet wird)
 try:
     sys.stdout.reconfigure(line_buffering=True)
 except AttributeError:
-    pass  # aeltere Python-Versionen: kein reconfigure verfuegbar
+    pass
 
-REQUEST_TIMEOUT = 20  # Sekunden - verhindert, dass das Script bei Netzwerkproblemen ewig haengt
+REQUEST_TIMEOUT = 20  # Sekunden
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,7 +50,10 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+TRACKED_FIELDS = ['name', 'phone', 'mobile', 'email', 'organization', 'note']
 
+
+# ---------- Validierung ----------
 
 def is_valid_name(name):
     return bool(re.search(r'[A-Za-zÀ-ÿ]', name or ''))
@@ -61,9 +65,20 @@ def is_valid_email(email):
     return bool(EMAIL_RE.match(email))
 
 
+def to_e164(raw, region="CH"):
+    raw = (raw or '').strip()
+    if not raw:
+        return ''
+    try:
+        parsed = phonenumbers.parse(raw, region)
+        if phonenumbers.is_valid_number(parsed):
+            return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+    except phonenumbers.NumberParseException:
+        pass
+    return raw
+
+
 def normalize_number(raw, region="CH"):
-    """Normalisiert eine Telefonnummer auf E.164 ohne '+' (nur Ziffern).
-    None, wenn nichts Sinnvolles extrahiert werden kann."""
     raw = (raw or '').strip()
     if not raw:
         return None
@@ -77,20 +92,23 @@ def normalize_number(raw, region="CH"):
     return digits if len(digits) >= 6 else None
 
 
-def to_e164(raw, region="CH"):
-    """Wie normalize_number, aber MIT '+' fuer den direkten Feldvergleich/Versand.
-    Gibt den Original-String zurueck, falls kein gueltiges Parsing moeglich ist."""
-    raw = (raw or '').strip()
-    if not raw:
-        return ''
-    try:
-        parsed = phonenumbers.parse(raw, region)
-        if phonenumbers.is_valid_number(parsed):
-            return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
-    except phonenumbers.NumberParseException:
-        pass
-    return raw
+# ---------- State-Datei ----------
 
+def load_state():
+    if not os.path.exists(config.state_file_path):
+        return None
+    with open(config.state_file_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def save_state(state):
+    tmp_path = config.state_file_path + '.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, config.state_file_path)  # atomarer Ersatz, kein halbgeschriebenes File bei Absturz
+
+
+# ---------- HTTP Helpers ----------
 
 def get_headers():
     return {
@@ -99,164 +117,31 @@ def get_headers():
     }
 
 
-def get_all_contacts(session, phonebook_contacts_url, headers, page_size=100):
-    """Alle Kontakte eines Telefonbuchs abrufen, dedupliziert nach Id."""
-    contacts_by_id = {}
-    offset = 0
-    previous_count = -1
-    stalled_pages = 0
-
-    log.info(f'Lade bestehende Kontakte von {phonebook_contacts_url} ...')
-
-    while True:
-        page_start = time.monotonic()
-        try:
-            response = session.get(
-                phonebook_contacts_url,
-                headers=headers,
-                params={'limit': page_size, 'offset': offset},
-                timeout=REQUEST_TIMEOUT,
-            )
-        except requests.exceptions.Timeout:
-            log.error(f'Timeout ({REQUEST_TIMEOUT}s) beim Abrufen der Kontakte (offset {offset}). '
-                      f'Pruefe Netzwerk/PBX-Erreichbarkeit.')
-            exit_program()
-        except requests.exceptions.RequestException as e:
-            log.error(f'Verbindungsfehler beim Abrufen der Kontakte (offset {offset}): {e}')
-            exit_program()
-        page_duration = time.monotonic() - page_start
-
-        if response.status_code != 200:
-            log.error(f'Fehler beim Abrufen der Kontakte (offset {offset}). '
-                      f'Statuscode: {response.status_code} Antwort: {response.text}')
-            exit_program()
-
-        data = response.json()
-        result = data.get('result', data)
-        records = result.get('records', []) if isinstance(result, dict) else result
-        total = result.get('total', len(records)) if isinstance(result, dict) else len(records)
-
-        if not records:
-            break
-
-        for record in records:
-            cid = record.get('id')
-            if cid is not None:
-                contacts_by_id[cid] = record
-
-        log.info(f'  ... {len(contacts_by_id)} von {total} Kontakten geladen '
-                 f'(diese Seite: {len(records)} Datensaetze in {page_duration:.1f}s, offset={offset})')
-
-        # SICHERHEITSCHECK: Wenn eine Seite keine neuen (bisher ungesehenen) Kontakte
-        # bringt, respektiert die PBX vermutlich 'limit'/'offset' nicht wie erwartet.
-        # Dann NICHT mit unvollstaendigen Daten weitermachen (Gefahr: faelschlich als
-        # "nicht mehr in CSV" erkannte Kontakte wuerden geloescht) - sondern abbrechen.
-        if len(contacts_by_id) == previous_count:
-            stalled_pages += 1
-            if stalled_pages >= 2:
-                log.error(
-                    'ABBRUCH: Die Kontaktliste waechst nicht mehr weiter, obwohl laut '
-                    f'API noch {total - len(contacts_by_id)} Kontakte fehlen. '
-                    'Die Parameter "limit"/"offset" werden von dieser PBX vermutlich '
-                    'nicht unterstuetzt oder die Pagination funktioniert anders als erwartet. '
-                    'Um versehentliches Loeschen wegen unvollstaendiger Daten zu verhindern, '
-                    'wird das Script hier gestoppt. Bitte in der API-Referenz '
-                    '(https://docs.wildix.com/api-reference/rest/wms/pbx/) den korrekten '
-                    'Pagination-Mechanismus fuer GET .../contacts/ pruefen.'
-                )
-                exit_program()
-        else:
-            stalled_pages = 0
-        previous_count = len(contacts_by_id)
-
-        if len(contacts_by_id) >= total or len(records) < page_size:
-            break
-        offset += page_size
-
-    return contacts_by_id
+def send_payload(fields):
+    parts = [f'data%5B{k}%5D={urllib.parse.quote(str(v))}' for k, v in fields.items()]
+    return '&'.join(parts)
 
 
-def build_document_id_index(contacts_by_id):
-    """document_id (CSV-Id) -> Kontakt-Id, nur fuer Kontakte, die bereits eine document_id haben."""
-    index = {}
-    for cid, contact in contacts_by_id.items():
-        doc_id = (contact.get('document_id') or '').strip()
-        if doc_id:
-            index[doc_id] = cid
-    return index
+def exit_program():
+    log.info("Exiting the program...")
+    sys.exit(0)
 
 
-def build_legacy_phone_index(contacts_by_id):
-    """Telefonnummer -> Kontakt-Id, NUR fuer Kontakte OHNE document_id (Migrations-Fallback)."""
-    index = {}
-    for cid, contact in contacts_by_id.items():
-        if (contact.get('document_id') or '').strip():
-            continue  # hat schon eine document_id, gehoert nicht in den Fallback-Index
-        for field in ('phone', 'mobile'):
-            norm = normalize_number(contact.get(field, ''))
-            if norm:
-                index.setdefault(norm, cid)
-    return index
+# ---------- CSV lesen + validieren ----------
 
-
-def diff_contact(existing, name, phone_plus, mobile, email, organization, note, record_id):
-    """Vergleicht bestehenden Kontakt mit den CSV-Werten. Gibt dict der geaenderten
-    Felder zurueck (leer = keine Aenderung)."""
-    changes = {}
-    checks = {
-        'name': name,
-        'phone': phone_plus,
-        'mobile': mobile,
-        'email': email,
-        'organization': organization,
-        'note': note,
-        'document_id': record_id,
-    }
-    for field, new_value in checks.items():
-        old_value = (existing.get(field) or '').strip()
-        if (new_value or '').strip() != old_value:
-            changes[field] = new_value
-    return changes
-
-
-def delete_contacts(session, phonebook_contacts_url, headers, contact_ids):
-    if not contact_ids:
-        log.info('Keine verwaisten (von diesem Script verwalteten) Kontakte zu loeschen.')
-        return
-
-    log.info(f'{len(contact_ids)} verwaiste Kontakte (document_id gesetzt, aber nicht mehr in CSV) '
-             f'werden geloescht...')
-
-    for contact_id in contact_ids:
-        del_url = f'{phonebook_contacts_url}{contact_id}/'
-        del_response = session.delete(del_url, headers=headers, timeout=REQUEST_TIMEOUT)
-
-        if del_response.status_code == 200:
-            log.info(f'Kontakt {contact_id} erfolgreich geloescht.')
-        else:
-            log.error(f'Fehler beim Loeschen von Kontakt {contact_id}. '
-                      f'Statuscode: {del_response.status_code} Antwort: {del_response.text}')
-
-
-def sync_contacts_from_csv(session, api_url, phonebook_contacts_url, csv_file, phonebook_id,
-                            existing_contacts, doc_id_index, legacy_phone_index):
-    headers = get_headers()
-    matched_ids = set()
-    stats = {'created': 0, 'updated': 0, 'unchanged': 0, 'adopted': 0, 'invalid': 0}
-
-    log.info(f'Starte CSV-Sync: {csv_file}')
+def read_and_validate_csv(csv_file):
+    """Liest die CSV, validiert jede Zeile und gibt eine Liste von dicts zurueck."""
+    rows = []
+    stats = {'valid': 0, 'invalid': 0}
 
     with open(csv_file, mode='r', encoding='utf-8-sig', newline='') as file:
         csv_reader = csv.DictReader(file)
         for line_no, row in enumerate(csv_reader, start=2):
-            if line_no % 100 == 0:
-                log.info(f'  ... Zeile {line_no} in Bearbeitung')
             record_id = row.get('Id', '').strip()
             name = row.get('Name', '').strip()
             email = row.get('Email', '').strip()
             organization = row.get('Organization', '').strip()
             note = row.get('Abteilung', '').strip()
-            row_type = row.get('Type', '').strip()
 
             if not record_id:
                 log.warning(f'Zeile {line_no} uebersprungen: keine Id in der CSV vorhanden.')
@@ -285,60 +170,89 @@ def sync_contacts_from_csv(session, api_url, phonebook_contacts_url, csv_file, p
                 stats['invalid'] += 1
                 continue
 
-            payload_fields = dict(
-                name=name, phonebook_id=phonebook_id, phone=phone_plus, mobile=mobile_value,
-                email=email, type=row_type, organization=organization, note=note,
-                document_id=record_id,
-            )
+            rows.append({
+                'record_id': record_id,
+                'name': name,
+                'phone': phone_plus,
+                'mobile': mobile_value,
+                'email': email,
+                'organization': organization,
+                'note': note,
+                'type': row.get('Type', '').strip(),
+            })
+            stats['valid'] += 1
 
-            def send_payload(fields):
-                parts = [f'data%5B{k}%5D={urllib.parse.quote(str(v))}' for k, v in fields.items()]
-                return '&'.join(parts)
+    log.info(f'CSV eingelesen: {stats["valid"]} gueltige Zeilen, {stats["invalid"]} uebersprungen.')
+    return rows
 
-            # 1. Primaer: Matching per document_id (CSV-Id)
-            existing_id = doc_id_index.get(record_id)
-            adopted = False
 
-            # 2. Fallback: Migration alter Kontakte (noch ohne document_id) per Telefonnummer
-            if existing_id is None:
-                existing_id = legacy_phone_index.get(phone_norm) or legacy_phone_index.get(mobile_norm)
-                adopted = existing_id is not None
+# ---------- Erstlauf: leeres Telefonbuch -> alle Kontakte anlegen ----------
 
-            if existing_id is not None:
-                matched_ids.add(existing_id)
-                existing = existing_contacts.get(existing_id, {})
-                changes = diff_contact(existing, name, phone_plus, mobile_value, email,
-                                        organization, note, record_id)
+def initial_import(session, api_url, headers, phonebook_id, rows):
+    state = {}
+    created, failed = 0, 0
 
-                if adopted or changes:
-                    put_url = f'{phonebook_contacts_url}{existing_id}/'
-                    data = send_payload(payload_fields)
-                    try:
-                        response = session.put(put_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
-                    except requests.exceptions.ConnectionError:
-                        log.warning('Connection Error: warte 10 sekunden')
-                        sleep(10)
-                        continue
+    for i, row in enumerate(rows, start=1):
+        if i % 200 == 0:
+            log.info(f'  ... {i} von {len(rows)} importiert')
 
-                    if response.status_code == 200:
-                        if adopted:
-                            log.info(f'Zeile {line_no} (Id {record_id}, {name}): alter Kontakt '
-                                     f'{existing_id} per Telefonnummer adoptiert, document_id gesetzt.')
-                            stats['adopted'] += 1
-                        else:
-                            log.info(f'Zeile {line_no} (Id {record_id}, {name}): Kontakt {existing_id} '
-                                     f'aktualisiert, geaenderte Felder: {list(changes.keys())}')
-                            stats['updated'] += 1
-                    else:
-                        log.error(f'Zeile {line_no} (Id {record_id}, {name}): Fehler beim Update '
-                                  f'von Kontakt {existing_id}. Statuscode: {response.status_code} '
-                                  f'Antwort: {response.text}')
-                else:
-                    log.debug(f'Zeile {line_no} (Id {record_id}, {name}): unveraendert, uebersprungen.')
-                    stats['unchanged'] += 1
-                continue
+        payload_fields = dict(
+            name=row['name'], phonebook_id=phonebook_id, phone=row['phone'],
+            mobile=row['mobile'], email=row['email'], type=row['type'],
+            organization=row['organization'], note=row['note'],
+            document_id=row['record_id'],
+        )
+        data = send_payload(payload_fields)
 
-            # 3. Kein Treffer -> neuer Kontakt
+        try:
+            response = session.post(api_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
+        except requests.exceptions.ConnectionError:
+            log.warning('Connection Error: warte 10 sekunden')
+            sleep(10)
+            continue
+
+        if response.status_code == 200:
+            new_id = response.json().get('result', {}).get('id')
+            state[row['record_id']] = {
+                'contact_id': new_id,
+                'name': row['name'], 'phone': row['phone'], 'mobile': row['mobile'],
+                'email': row['email'], 'organization': row['organization'], 'note': row['note'],
+            }
+            created += 1
+        else:
+            log.error(f'Fehler beim Anlegen von Id {row["record_id"]} ({row["name"]}). '
+                      f'Statuscode: {response.status_code} Antwort: {response.text}')
+            failed += 1
+
+        # Zwischenspeichern alle 200 Kontakte, damit bei einem Abbruch nicht alles verloren geht
+        if i % 200 == 0:
+            save_state(state)
+
+    log.info(f'Erstimport fertig: {created} angelegt, {failed} fehlgeschlagen.')
+    return state
+
+
+# ---------- Folgelaeufe: state-basierter Sync ----------
+
+def sync_with_state(session, api_url, phonebook_contacts_url, headers, phonebook_id, rows, state):
+    seen_ids = set()
+    stats = {'created': 0, 'updated': 0, 'unchanged': 0, 'failed': 0}
+
+    for i, row in enumerate(rows, start=1):
+        if i % 200 == 0:
+            log.info(f'  ... {i} von {len(rows)} verarbeitet')
+
+        rid = row['record_id']
+        seen_ids.add(rid)
+        existing = state.get(rid)
+
+        payload_fields = dict(
+            name=row['name'], phonebook_id=phonebook_id, phone=row['phone'],
+            mobile=row['mobile'], email=row['email'], type=row['type'],
+            organization=row['organization'], note=row['note'], document_id=rid,
+        )
+
+        if existing is None:
             data = send_payload(payload_fields)
             try:
                 response = session.post(api_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
@@ -348,56 +262,97 @@ def sync_contacts_from_csv(session, api_url, phonebook_contacts_url, csv_file, p
                 continue
 
             if response.status_code == 200:
-                log.info(f'Zeile {line_no} (Id {record_id}, {name}): neu importiert.')
-                stats['created'] += 1
                 new_id = response.json().get('result', {}).get('id')
-                if new_id is not None:
-                    matched_ids.add(new_id)
+                state[rid] = {
+                    'contact_id': new_id,
+                    'name': row['name'], 'phone': row['phone'], 'mobile': row['mobile'],
+                    'email': row['email'], 'organization': row['organization'], 'note': row['note'],
+                }
+                stats['created'] += 1
+                log.info(f'Id {rid} ({row["name"]}): neu angelegt.')
             else:
-                log.error(f'Zeile {line_no} (Id {record_id}, {name}): Fehler beim Anlegen. '
+                log.error(f'Fehler beim Anlegen von Id {rid} ({row["name"]}). '
                           f'Statuscode: {response.status_code} Antwort: {response.text}')
+                stats['failed'] += 1
+            continue
 
-    log.info(f"CSV-Sync fertig: {stats['created']} neu angelegt, {stats['updated']} aktualisiert, "
-             f"{stats['adopted']} alte Kontakte adoptiert, {stats['unchanged']} unveraendert, "
-             f"{stats['invalid']} ungueltige Zeilen uebersprungen.")
+        changed_fields = [f for f in TRACKED_FIELDS if row[f] != existing.get(f, '')]
+        if not changed_fields:
+            stats['unchanged'] += 1
+            continue
 
-    return matched_ids
+        put_url = f'{phonebook_contacts_url}{existing["contact_id"]}/'
+        data = send_payload(payload_fields)
+        try:
+            response = session.put(put_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
+        except requests.exceptions.ConnectionError:
+            log.warning('Connection Error: warte 10 sekunden')
+            sleep(10)
+            continue
+
+        if response.status_code == 200:
+            state[rid] = {
+                'contact_id': existing['contact_id'],
+                'name': row['name'], 'phone': row['phone'], 'mobile': row['mobile'],
+                'email': row['email'], 'organization': row['organization'], 'note': row['note'],
+            }
+            stats['updated'] += 1
+            log.info(f'Id {rid} ({row["name"]}): aktualisiert, geaenderte Felder: {changed_fields}')
+        else:
+            log.error(f'Fehler beim Update von Id {rid} ({row["name"]}). '
+                      f'Statuscode: {response.status_code} Antwort: {response.text}')
+            stats['failed'] += 1
+
+    # Kontakte loeschen, die es in der state-Datei gibt, aber nicht mehr in der CSV
+    orphaned_ids = [rid for rid in state if rid not in seen_ids]
+    log.info(f'{len(orphaned_ids)} Kontakte nicht mehr in der CSV -> werden geloescht.')
+    for rid in orphaned_ids:
+        contact_id = state[rid]['contact_id']
+        del_url = f'{phonebook_contacts_url}{contact_id}/'
+        try:
+            del_response = session.delete(del_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        except requests.exceptions.RequestException as e:
+            log.error(f'Fehler beim Loeschen von Kontakt {contact_id} (Id {rid}): {e}')
+            continue
+
+        if del_response.status_code == 200:
+            log.info(f'Id {rid}: Kontakt {contact_id} geloescht (nicht mehr in CSV).')
+            del state[rid]
+        else:
+            log.error(f'Fehler beim Loeschen von Kontakt {contact_id} (Id {rid}). '
+                      f'Statuscode: {del_response.status_code} Antwort: {del_response.text}')
+
+    log.info(f"Sync fertig: {stats['created']} neu, {stats['updated']} aktualisiert, "
+             f"{stats['unchanged']} unveraendert, {len(orphaned_ids)} geloescht, "
+             f"{stats['failed']} fehlgeschlagen.")
+    return state
 
 
-def exit_program():
-    log.info("Exiting the program...")
-    sys.exit(0)
-
+# ---------- Main ----------
 
 if __name__ == "__main__":
     log.info("=== Wildix Contact Sync gestartet ===")
     log.info(f"Phonebook-URL: {config.phonebook_contacts_url}")
 
     headers = {'Authorization': f'Bearer {config.api_key}'}
+    state = load_state()
 
-    # Gemeinsame Session fuer alle Requests, damit Cookies (z.B. PHPSESSID),
-    # die die PBX setzt, ueber alle Aufrufe hinweg (inkl. Pagination) erhalten
-    # bleiben statt bei jedem Request neu verhandelt zu werden.
     with requests.Session() as session:
         session.headers.update(headers)
 
-        # 1. Bestehende Kontakte laden
-        existing_contacts = get_all_contacts(session, config.phonebook_contacts_url, headers)
-        log.info(f'{len(existing_contacts)} bestehende Kontakte im Telefonbuch gefunden.')
-
-        doc_id_index = build_document_id_index(existing_contacts)
-        legacy_phone_index = build_legacy_phone_index(existing_contacts)
-        log.info(f'{len(doc_id_index)} Kontakte mit document_id (von diesem Script verwaltet), '
-                 f'{len(legacy_phone_index)} Telefonnummern aus Alt-Kontakten fuer Migration verfuegbar.')
-
-        # 2. CSV syncen
-        matched_ids = sync_contacts_from_csv(
-            session, config.api_url, config.phonebook_contacts_url, config.csv_file_path,
-            config.phonebook_id, existing_contacts, doc_id_index, legacy_phone_index
-        )
-
-        # 3. Verwaiste, von diesem Script verwaltete Kontakte loeschen
-        #    (nur Kontakte mit document_id, die NICHT in der CSV vorkamen)
-        managed_ids = set(doc_id_index.values())
-        orphaned_ids = [cid for cid in managed_ids if cid not in matched_ids]
-        delete_contacts(session, config.phonebook_contacts_url, headers, orphaned_ids)
+        if state is None:
+            log.info(f'Keine state-Datei gefunden ({config.state_file_path}) -> ERSTLAUF-MODUS: '
+                     'alle CSV-Zeilen werden neu angelegt (Telefonbuch sollte bereits leer sein).')
+            rows = read_and_validate_csv(config.csv_file_path)
+            state = initial_import(session, config.api_url, headers, config.phonebook_id, rows)
+            save_state(state)
+            log.info(f'Erstimport abgeschlossen. Zustand gespeichert in {config.state_file_path}.')
+        else:
+            log.info(f'state-Datei gefunden ({len(state)} bekannte Kontakte) -> normaler Sync-Modus.')
+            rows = read_and_validate_csv(config.csv_file_path)
+            state = sync_with_state(
+                session, config.api_url, config.phonebook_contacts_url, headers,
+                config.phonebook_id, rows, state
+            )
+            save_state(state)
+            log.info(f'Sync abgeschlossen. Zustand gespeichert in {config.state_file_path}.')
